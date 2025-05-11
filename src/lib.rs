@@ -120,3 +120,11 @@ pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> Eva
 
     EvalResult { output, exit_code, error }
 }
+
+pub fn eval_result_to_json(result: &EvalResult) -> serde_json::Value {
+    serde_json::json!({
+        "output": result.output,
+        "exit_code": result.exit_code,
+        "error": result.error
+    })
+}
