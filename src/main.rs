@@ -9,14 +9,15 @@ use serde::Serialize;
 use std::collections::HashMap;
 mod custom_exit;
 use nu_protocol::debugger::WithoutDebug;
+
 #[derive(Debug, Serialize)]
 pub struct EvalResult {
     pub output: serde_json::Value,
     pub exit_code: i32,
-    pub errors: Vec<String>,
+    pub error: serde_json::Value,
 }
 
-pub fn get_engine_state() -> EngineState {
+fn get_engine_state() -> EngineState {
     let engine_state = nu_cmd_lang::create_default_context();
     let engine_state = nu_cmd_plugin::add_plugin_command_context(engine_state);
     let engine_state = nu_command::add_shell_command_context(engine_state);
@@ -45,13 +46,13 @@ pub fn get_engine_state() -> EngineState {
 pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> EvalResult {
     let mut engine_state = get_engine_state();
     let mut stack = Stack::new();
-    let mut errors = Vec::new();
+    let mut error: Option<serde_json::Value> = None;
 
     for (k, v) in env_vars.iter() {
         engine_state.add_env_var(k.clone(), Value::string(v.clone(), Span::unknown()));
     }
 
-    let result = run_parse_and_eval(&mut engine_state, &mut stack, command, &mut errors);
+    let result = run_parse_and_eval(&mut engine_state, &mut stack, command, &mut error);
 
     let (output, exit_code) = match result {
         Ok(value) => {
@@ -62,65 +63,69 @@ pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> Eva
                     std::process::exit(1);
                 }
             };
-
-            (serde_json::from_str(&json_data).unwrap(), i32::from(0))
+            (serde_json::from_str(&json_data).unwrap(), 0)
         }
-        Err(code) => (serde_json::from_str("null").unwrap(), i32::from(code)),
+        Err(code) => (serde_json::Value::Null, code),
     };
 
     EvalResult {
         output,
         exit_code,
-        errors,
+        error: error.unwrap_or(serde_json::Value::Null),
     }
 }
+
 fn run_parse_and_eval(
     engine_state: &mut EngineState,
     stack: &mut Stack,
     full_cmd: &str,
-    errors: &mut Vec<String>,
+    error: &mut Option<serde_json::Value>,
 ) -> Result<Value, i32> {
-    // Step 1: Parse and evaluate the input command
     let mut working_set = StateWorkingSet::new(engine_state);
     let parse_result = parse(&mut working_set, None, full_cmd.as_bytes(), false);
 
     if !working_set.parse_errors.is_empty() {
-        for e in &working_set.parse_errors {
-            errors.push(format!("Parse error: {} at {:?}", e, e.span()));
-        }
+        let e = &working_set.parse_errors[0];
+        *error = Some(serde_json::Value::String(
+            serde_json::to_string(&Value::string(format!("Parse error: {} at {:?}", e, e.span()), Span::unknown())).unwrap(),
+        ));
         return Err(2);
     }
 
     let delta = working_set.render();
     if let Err(err) = engine_state.merge_delta(delta) {
-        errors.push(format!("Delta merge error: {:#?}", err));
+        *error = Some(serde_json::Value::String(
+            serde_json::to_string(&Value::string(format!("Delta merge error: {:#?}", err), Span::unknown())).unwrap(),
+        ));
         return Err(1);
     }
 
     let eval_fn = get_eval_block(engine_state);
     let value = match eval_fn(engine_state, stack, &parse_result, PipelineData::empty()) {
         Ok(pipeline_data) => pipeline_data.into_value(Span::unknown()).map_err(|e| {
-            errors.push(format!("Value extraction error: {:#?}", e));
+            let str_err = format!("Value extraction error: {:#?}", e);
+            *error = Some(serde_json::from_str(&str_err).unwrap());
             1
         })?,
-        Err(err) => {
-            match err {
-                ShellError::Return { span: _, value } => *value, // Extract the value from Return
-                ShellError::NonZeroExitCode { exit_code, .. } => {
-                    errors.push(format!("Shell execution error: {:#?}", err));
-                    return Err(i32::from(exit_code));
-                }
-                _ => {
-                    errors.push(format!("Shell execution error: {:#?}", err));
-                    return Err(1);
-                }
+        Err(err) => match err {
+            ShellError::Return { span: _, value } => *value,
+            ShellError::NonZeroExitCode { exit_code, .. } => {
+                *error = Some(serde_json::from_str(&serde_json::to_string(&err).unwrap_or_default()).unwrap());
+                
+                return Err(exit_code.into());
             }
-        }
+            _ => {
+                *error = Some(
+                    serde_json::from_str(&serde_json::to_string(&err).unwrap_or_default()).unwrap());
+                return Err(1);
+            }
+        },
     };
 
-    // Step 2: Convert the resulting Value to JSON using the `to json` command
     let to_json_cmd = engine_state.find_decl(b"to json", &[]).ok_or_else(|| {
-        errors.push("Could not find 'to json' command".to_string());
+        *error = Some(serde_json::Value::String(
+            serde_json::to_string(&Value::string("Could not find 'to json' command", Span::unknown())).unwrap(),
+        ));
         1
     })?;
 
@@ -135,11 +140,15 @@ fn run_parse_and_eval(
     let pipeline_data = PipelineData::Value(value, None);
     match eval_call::<WithoutDebug>(engine_state, &mut stack, &call, pipeline_data) {
         Ok(pipeline_data) => pipeline_data.into_value(Span::unknown()).map_err(|e| {
-            errors.push(format!("JSON conversion error: {:#?}", e));
+            *error = Some(serde_json::Value::String(
+                serde_json::to_string(&Value::string(format!("JSON conversion error: {:#?}", e), Span::unknown())).unwrap(),
+            ));
             1
         }),
         Err(err) => {
-            errors.push(format!("JSON conversion error: {:#?}", err));
+            *error = Some(serde_json::Value::String(
+                serde_json::to_string(&Value::string(format!("JSON conversion error: {:#?}", err), Span::unknown())).unwrap(),
+            ));
             Err(1)
         }
     }
@@ -154,12 +163,12 @@ fn main() {
             for (k, v) in std::env::vars() {
                 env_vars.insert(k, v);
             }
-            // if windows add PWD to env_vars
+
             #[cfg(target_os = "windows")]
             {
                 env_vars.insert("PWD".to_string(), std::env::current_dir().unwrap().to_str().unwrap().to_string());
             }
-            
+
             let result = evaluate_command(cmd, env_vars);
             println!("{}", serde_json::to_string_pretty(&result).unwrap());
         } else {
