@@ -154,6 +154,12 @@ fn main() {
             for (k, v) in std::env::vars() {
                 env_vars.insert(k, v);
             }
+            // if windows add PWD to env_vars
+            #[cfg(target_os = "windows")]
+            {
+                env_vars.insert("PWD".to_string(), std::env::current_dir().unwrap().to_str().unwrap().to_string());
+            }
+            
             let result = evaluate_command(cmd, env_vars);
             println!("{}", serde_json::to_string_pretty(&result).unwrap());
         } else {
