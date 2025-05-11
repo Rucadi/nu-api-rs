@@ -2536,6 +2536,7 @@ dependencies = [
  "nu-protocol",
  "nu-std",
  "nu-utils",
+ "serde",
  "serde_json",
 ]
 
