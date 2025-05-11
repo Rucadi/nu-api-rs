@@ -1,14 +1,13 @@
 use nu_cmd_extra;
-use nu_engine::eval_call;
-use nu_engine::get_eval_block;
+use nu_engine::{eval_call, get_eval_block};
 use nu_parser::parse;
 use nu_protocol::engine::{EngineState, Stack, StateWorkingSet};
 use nu_protocol::{PipelineData, ShellError, Span, Value};
 use nu_std::load_standard_library;
 use serde::Serialize;
 use std::collections::HashMap;
-mod custom_exit;
 use nu_protocol::debugger::WithoutDebug;
+mod custom_exit;
 
 #[derive(Debug, Serialize)]
 pub struct EvalResult {
@@ -17,6 +16,7 @@ pub struct EvalResult {
     pub error: serde_json::Value,
 }
 
+/// Builds and configures a fresh EngineState
 fn get_engine_state() -> EngineState {
     let engine_state = nu_cmd_lang::create_default_context();
     let engine_state = nu_cmd_plugin::add_plugin_command_context(engine_state);
@@ -43,115 +43,81 @@ fn get_engine_state() -> EngineState {
     engine_state
 }
 
-pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> EvalResult {
-    let mut engine_state = get_engine_state();
-    let mut stack = Stack::new();
-    let mut error: Option<serde_json::Value> = None;
+/// Parses and evaluates a command, collecting errors if any
+fn run_parse_and_eval(
+    engine: &mut EngineState,
+    stack: &mut Stack,
+    cmd: &str,
+) -> Result<Value, (i32, serde_json::Value)> {
+    let mut ws = StateWorkingSet::new(engine);
+    let parse_result = parse(&mut ws, None, cmd.as_bytes(), false);
 
-    for (k, v) in env_vars.iter() {
-        engine_state.add_env_var(k.clone(), Value::string(v.clone(), Span::unknown()));
+    if let Some(err) = ws.parse_errors.first() {
+        let msg = format!("Parse error: {} at {:?}", err, err.span());
+        return Err((2, serde_json::json!(msg)));
     }
+    engine.merge_delta(ws.render()).map_err(|e| (1, serde_json::json!(format!("Delta merge error: {:#?}", e))))?;
 
-    let result = run_parse_and_eval(&mut engine_state, &mut stack, command, &mut error);
-
-    let (output, exit_code) = match result {
-        Ok(value) => {
-            let json_data = match value {
-                Value::String { val, .. } => val,
-                other => {
-                    eprintln!("Expected a JSON string, got {:?}", other.get_type());
-                    std::process::exit(1);
-                }
-            };
-            (serde_json::from_str(&json_data).unwrap(), 0)
+    let eval_fn = get_eval_block(engine);
+    match eval_fn(engine, stack, &parse_result, PipelineData::empty()) {
+        Ok(data) => data.into_value(Span::unknown()).map_err(|e| (1, serde_json::json!(format!("Value extraction error: {:#?}", e)))),
+        Err(err) => match err {
+            ShellError::Return { span: _, value } => Ok(*value),
+            ShellError::NonZeroExitCode { exit_code, .. } => {
+                Err((exit_code.into(), serde_json::from_str(&serde_json::to_string(&err).unwrap_or_default()).unwrap()))
+            }
+            _ => {
+                Err((1, serde_json::from_str(&serde_json::to_string(&err).unwrap_or_default()).unwrap()))
+            }
         }
-        Err(code) => (serde_json::Value::Null, code),
-    };
-
-    EvalResult {
-        output,
-        exit_code,
-        error: error.unwrap_or(serde_json::Value::Null),
+     
     }
 }
 
-fn run_parse_and_eval(
-    engine_state: &mut EngineState,
-    stack: &mut Stack,
-    full_cmd: &str,
-    error: &mut Option<serde_json::Value>,
-) -> Result<Value, i32> {
-    let mut working_set = StateWorkingSet::new(engine_state);
-    let parse_result = parse(&mut working_set, None, full_cmd.as_bytes(), false);
-
-    if !working_set.parse_errors.is_empty() {
-        let e = &working_set.parse_errors[0];
-        *error = Some(serde_json::Value::String(
-            serde_json::to_string(&Value::string(format!("Parse error: {} at {:?}", e, e.span()), Span::unknown())).unwrap(),
-        ));
-        return Err(2);
-    }
-
-    let delta = working_set.render();
-    if let Err(err) = engine_state.merge_delta(delta) {
-        *error = Some(serde_json::Value::String(
-            serde_json::to_string(&Value::string(format!("Delta merge error: {:#?}", err), Span::unknown())).unwrap(),
-        ));
-        return Err(1);
-    }
-
-    let eval_fn = get_eval_block(engine_state);
-    let value = match eval_fn(engine_state, stack, &parse_result, PipelineData::empty()) {
-        Ok(pipeline_data) => pipeline_data.into_value(Span::unknown()).map_err(|e| {
-            let str_err = format!("Value extraction error: {:#?}", e);
-            *error = Some(serde_json::from_str(&str_err).unwrap());
-            1
-        })?,
-        Err(err) => match err {
-            ShellError::Return { span: _, value } => *value,
-            ShellError::NonZeroExitCode { exit_code, .. } => {
-                *error = Some(serde_json::from_str(&serde_json::to_string(&err).unwrap_or_default()).unwrap());
-                
-                return Err(exit_code.into());
-            }
-            _ => {
-                *error = Some(
-                    serde_json::from_str(&serde_json::to_string(&err).unwrap_or_default()).unwrap());
-                return Err(1);
-            }
-        },
-    };
-
-    let to_json_cmd = engine_state.find_decl(b"to json", &[]).ok_or_else(|| {
-        *error = Some(serde_json::Value::String(
-            serde_json::to_string(&Value::string("Could not find 'to json' command", Span::unknown())).unwrap(),
-        ));
-        1
-    })?;
-
+/// Converts a Value into JSON via 'to json' command
+fn convert_to_json(engine: &mut EngineState, val: Value) -> Result<serde_json::Value, (i32, serde_json::Value)> {
     let mut stack = Stack::new();
+    let decl = engine
+        .find_decl(b"to json", &[])
+        .ok_or((1, serde_json::json!("Could not find 'to json' command")))?;
+
     let call = nu_protocol::ast::Call {
-        decl_id: to_json_cmd,
+        decl_id: decl,
         arguments: vec![],
         head: Span::unknown(),
-        parser_info: HashMap::new(),
+        parser_info: Default::default(),
+    };
+    match eval_call::<WithoutDebug>(engine, &mut stack, &call, PipelineData::Value(val, None)) {
+        Ok(pd) => pd
+            .into_value(Span::unknown())
+            .map_err(|e| (1, serde_json::json!(format!("JSON conversion error: {:#?}", e))))
+            .and_then(|v| {
+                match v {
+                    Value::String { val, .. } => serde_json::from_str(&val).map_err(|e| (1, serde_json::json!(e.to_string()))),
+                    other => Err((1, serde_json::json!(format!("Expected JSON string, got {:?}", other.get_type())))),
+                }
+            }),
+        Err(err) => Err((1, serde_json::json!(format!("JSON conversion error: {:#?}", err)))),
+    }
+}
+
+/// Evaluates a Nushell command string and returns JSON result
+pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> EvalResult {
+    let mut engine = get_engine_state();
+    for (k, v) in env_vars {
+        engine.add_env_var(k, Value::string(v, Span::unknown()));
+    }
+
+    let mut stack = Stack::new();
+    let (output, exit_code, error) = match run_parse_and_eval(&mut engine, &mut stack, command) {
+        Ok(val) => match convert_to_json(&mut engine, val) {
+            Ok(json) => (json, 0, serde_json::Value::Null),
+            Err((code, err)) => (serde_json::Value::Null, code, err),
+        },
+        Err((code, err)) => (serde_json::Value::Null, code, err),
     };
 
-    let pipeline_data = PipelineData::Value(value, None);
-    match eval_call::<WithoutDebug>(engine_state, &mut stack, &call, pipeline_data) {
-        Ok(pipeline_data) => pipeline_data.into_value(Span::unknown()).map_err(|e| {
-            *error = Some(serde_json::Value::String(
-                serde_json::to_string(&Value::string(format!("JSON conversion error: {:#?}", e), Span::unknown())).unwrap(),
-            ));
-            1
-        }),
-        Err(err) => {
-            *error = Some(serde_json::Value::String(
-                serde_json::to_string(&Value::string(format!("JSON conversion error: {:#?}", err), Span::unknown())).unwrap(),
-            ));
-            Err(1)
-        }
-    }
+    EvalResult { output, exit_code, error }
 }
 
 fn main() {
