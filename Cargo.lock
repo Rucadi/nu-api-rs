@@ -1973,26 +1973,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nu-api-rs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "nu-cli",
- "nu-cmd-extra",
- "nu-cmd-lang",
- "nu-cmd-plugin",
- "nu-command",
- "nu-engine",
- "nu-explore",
- "nu-parser",
- "nu-protocol",
- "nu-std",
- "nu-utils",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "nu-cli"
 version = "0.104.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2476,6 +2456,26 @@ dependencies = [
  "strip-ansi-escapes",
  "sys-locale",
  "unicase",
+]
+
+[[package]]
+name = "nu_json_api_rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nu-cli",
+ "nu-cmd-extra",
+ "nu-cmd-lang",
+ "nu-cmd-plugin",
+ "nu-command",
+ "nu-engine",
+ "nu-explore",
+ "nu-parser",
+ "nu-protocol",
+ "nu-std",
+ "nu-utils",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
