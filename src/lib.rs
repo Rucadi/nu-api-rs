@@ -103,7 +103,7 @@ fn convert_to_json(engine: &mut EngineState, val: Value) -> Result<serde_json::V
 }
 
 /// Evaluates a Nushell command string and returns JSON result
-pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> EvalResult {
+pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> serde_json::Value  {
     let mut engine = get_engine_state();
     for (k, v) in env_vars {
         engine.add_env_var(k, Value::string(v, Span::unknown()));
@@ -117,14 +117,10 @@ pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> Eva
         },
         Err((code, err)) => (serde_json::Value::Null, code, err),
     };
-
-    EvalResult { output, exit_code, error }
-}
-
-pub fn eval_result_to_json(result: &EvalResult) -> serde_json::Value {
     serde_json::json!({
-        "output": result.output,
-        "exit_code": result.exit_code,
-        "error": result.error
+        "output": output,
+        "exit_code": exit_code,
+        "error": error
     })
 }
+
