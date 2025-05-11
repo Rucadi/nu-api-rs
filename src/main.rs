@@ -1,13 +1,13 @@
+use nu_cmd_extra;
+use nu_engine::eval_call;
 use nu_engine::get_eval_block;
 use nu_parser::parse;
 use nu_protocol::engine::{EngineState, Stack, StateWorkingSet};
 use nu_protocol::{PipelineData, ShellError, Span, Value};
 use nu_std::load_standard_library;
-use nu_cmd_extra;
-use std::collections::HashMap;
 use serde::Serialize;
-use nu_engine::eval_call;
-
+use std::collections::HashMap;
+mod custom_exit;
 use nu_protocol::debugger::WithoutDebug;
 #[derive(Debug, Serialize)]
 pub struct EvalResult {
@@ -29,7 +29,7 @@ pub fn get_engine_state() -> EngineState {
         let mut working_set = StateWorkingSet::new(&engine_state);
         working_set.add_decl(Box::new(nu_cli::NuHighlight));
         working_set.add_decl(Box::new(nu_cli::Print));
-        working_set.hide_decl(b"exit");
+        working_set.add_decl(Box::new(custom_exit::CustomExit));
         working_set.render()
     };
     let _ = engine_state.merge_delta(delta);
@@ -54,7 +54,7 @@ pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> Eva
     let result = run_parse_and_eval(&mut engine_state, &mut stack, command, &mut errors);
 
     let (output, exit_code) = match result {
-        Ok(value) => { 
+        Ok(value) => {
             let json_data = match value {
                 Value::String { val, .. } => val,
                 other => {
@@ -64,10 +64,9 @@ pub fn evaluate_command(command: &str, env_vars: HashMap<String, String>) -> Eva
             };
 
             (serde_json::from_str(&json_data).unwrap(), i32::from(0))
-        },
+        }
         Err(code) => (serde_json::from_str("null").unwrap(), i32::from(code)),
     };
-
 
     EvalResult {
         output,
@@ -100,12 +99,10 @@ fn run_parse_and_eval(
 
     let eval_fn = get_eval_block(engine_state);
     let value = match eval_fn(engine_state, stack, &parse_result, PipelineData::empty()) {
-        Ok(pipeline_data) => {
-            pipeline_data.into_value(Span::unknown()).map_err(|e| {
-                errors.push(format!("Value extraction error: {:#?}", e));
-                1
-            })?
-        }
+        Ok(pipeline_data) => pipeline_data.into_value(Span::unknown()).map_err(|e| {
+            errors.push(format!("Value extraction error: {:#?}", e));
+            1
+        })?,
         Err(err) => {
             match err {
                 ShellError::Return { span: _, value } => *value, // Extract the value from Return
@@ -137,12 +134,10 @@ fn run_parse_and_eval(
 
     let pipeline_data = PipelineData::Value(value, None);
     match eval_call::<WithoutDebug>(engine_state, &mut stack, &call, pipeline_data) {
-        Ok(pipeline_data) => {
-            pipeline_data.into_value(Span::unknown()).map_err(|e| {
-                errors.push(format!("JSON conversion error: {:#?}", e));
-                1
-            })
-        }
+        Ok(pipeline_data) => pipeline_data.into_value(Span::unknown()).map_err(|e| {
+            errors.push(format!("JSON conversion error: {:#?}", e));
+            1
+        }),
         Err(err) => {
             errors.push(format!("JSON conversion error: {:#?}", err));
             Err(1)
@@ -156,7 +151,9 @@ fn main() {
         if args.len() > pos + 1 {
             let cmd = &args[pos + 1];
             let mut env_vars = HashMap::new();
-            for (k, v) in std::env::vars() { env_vars.insert(k, v); }
+            for (k, v) in std::env::vars() {
+                env_vars.insert(k, v);
+            }
             let result = evaluate_command(cmd, env_vars);
             println!("{}", serde_json::to_string_pretty(&result).unwrap());
         } else {
@@ -164,7 +161,10 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        eprintln!("Usage: {} -c 'command'", args.get(0).unwrap_or(&"nushell_runner".to_string()));
+        eprintln!(
+            "Usage: {} -c 'command'",
+            args.get(0).unwrap_or(&"nushell_runner".to_string())
+        );
         std::process::exit(1);
     }
 }
