@@ -1,0 +1,15 @@
+[package]
+name = "nushell_eval_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nu-parser = "0.104.0"
+nu-engine = "0.104.0"
+nu-protocol = "0.104.0"
+nu-cmd-lang = "0.104.0"
+nu-command = "0.104.0"
+nu-cli = "0.104.0"
+nu-std = "0.104.0"
+anyhow       = "1.0"       # for easy error handling
+nu-utils = "0.104.0"
