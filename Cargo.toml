@@ -1,5 +1,5 @@
 [package]
-name = "nushell_eval_test"
+name = "nu-api-rs"
 version = "0.1.0"
 edition = "2021"
 
